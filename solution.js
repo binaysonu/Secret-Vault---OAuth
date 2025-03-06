@@ -6,6 +6,7 @@ import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
 import session from "express-session";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
+import flash from "connect-flash";
 
 const app = express();
 const port = 3000;
@@ -14,7 +15,7 @@ const saltRounds = 10;
 // Session setup
 app.use(
   session({
-    secret: "your_secret_key",
+    secret: "secret_word_here",
     resave: false,
     saveUninitialized: true,
   })
@@ -22,17 +23,18 @@ app.use(
 
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static("public"));
+app.use(flash());
 
 app.use(passport.initialize());
 app.use(passport.session());
 
-mongoose.connect("mongodb://127.0.0.1:27017/userDB", {
+mongoose.connect("mongodb://127.0.0.1:27017/oauthDB", {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 });
 
 const userSchema = new mongoose.Schema({
-  email: String,
+  email: { type: String, required: true, unique: true },
   password: String,
   googleId: String,
 });
@@ -43,8 +45,8 @@ const User = mongoose.model("User", userSchema);
 passport.use(
   new GoogleStrategy(
     {
-      clientID: "YOUR_GOOGLE_CLIENT_ID",
-      clientSecret: "YOUR_GOOGLE_CLIENT_SECRET",
+      clientID: "give_ur_id_here",
+      clientSecret: "secret_here",
       callbackURL: "http://localhost:3000/auth/google/secrets",
     },
     async function (accessToken, refreshToken, profile, done) {
@@ -64,34 +66,37 @@ passport.use(
 
 // Local Strategy for Email/Password Authentication
 passport.use(
-  new LocalStrategy(async function verify(username, password, cb) {
+  new LocalStrategy({ usernameField: "username" }, async function (username, password, done) {
     try {
       const user = await User.findOne({ email: username });
-      if (user) {
-        bcrypt.compare(password, user.password, (err, valid) => {
-          if (err) return cb(err);
-          return cb(null, valid ? user : false);
-        });
-      } else {
-        return cb(null, false);
+
+      if (!user) {
+        return done(null, false, { message: "User not found. Please register first." });
       }
+
+      bcrypt.compare(password, user.password, (err, valid) => {
+        if (err) return done(err);
+        if (!valid) return done(null, false, { message: "Incorrect password." });
+
+        return done(null, user);
+      });
     } catch (err) {
-      return cb(err);
+      return done(err);
     }
   })
 );
 
 // Serialize and Deserialize user
-passport.serializeUser((user, cb) => {
-  cb(null, user.id);
+passport.serializeUser((user, done) => {
+  done(null, user.id);
 });
 
-passport.deserializeUser(async (id, cb) => {
+passport.deserializeUser(async (id, done) => {
   try {
     const user = await User.findById(id);
-    cb(null, user);
+    done(null, user);
   } catch (err) {
-    cb(err);
+    done(err);
   }
 });
 
@@ -101,11 +106,11 @@ app.get("/", (req, res) => {
 });
 
 app.get("/login", (req, res) => {
-  res.render("login.ejs");
+  res.render("login.ejs", { errorMessage: req.flash("error") });
 });
 
 app.get("/register", (req, res) => {
-  res.render("register.ejs");
+  res.render("register.ejs", { errorMessage: req.flash("error") });
 });
 
 app.get("/logout", (req, res) => {
@@ -138,7 +143,22 @@ app.get(
 );
 
 // Local Authentication Routes
-app.post("/login", passport.authenticate("local", { successRedirect: "/secrets", failureRedirect: "/login" }));
+app.post(
+  "/login",
+  (req, res, next) => {
+    passport.authenticate("local", (err, user, info) => {
+      if (err) return next(err);
+      if (!user) {
+        req.flash("error", info.message);
+        return res.redirect("/login");
+      }
+      req.login(user, (err) => {
+        if (err) return next(err);
+        return res.redirect("/secrets");
+      });
+    })(req, res, next);
+  }
+);
 
 app.post("/register", async (req, res) => {
   const email = req.body.username;
@@ -146,26 +166,32 @@ app.post("/register", async (req, res) => {
 
   try {
     const existingUser = await User.findOne({ email });
+
     if (existingUser) {
-      res.redirect("/login");
-    } else {
-      bcrypt.hash(password, saltRounds, async (err, hash) => {
-        if (err) console.error("Error hashing password:", err);
-        else {
-          const newUser = new User({ email, password: hash });
-          await newUser.save();
-          req.login(newUser, (err) => {
-            if (err) console.error(err);
-            res.redirect("/secrets");
-          });
-        }
-      });
+      req.flash("error", "Email already registered. Please log in.");
+      return res.redirect("/login");
     }
+
+    bcrypt.hash(password, saltRounds, async (err, hash) => {
+      if (err) {
+        console.error("Error hashing password:", err);
+        return res.redirect("/register");
+      }
+
+      const newUser = new User({ email, password: hash });
+      await newUser.save();
+
+      res.send("error", "Registration successful! Please log in.");
+      res.redirect("/login");
+    });
   } catch (err) {
-    console.log(err);
+    console.error(err);
+    res.send("error", "An error occurred. Please try again.");
+    res.redirect("/register");
   }
 });
 
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
+
